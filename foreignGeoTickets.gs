@@ -3,9 +3,8 @@
   (CONFIG.knownGeos), с разбивкой по Ticket type на 2 отдельных листа.
 
   Это модификация скрипта синхронизации зависших тикетов (Буфер → Tracking
-  → Архив, ручной перенос решённых, Лог переноса, диагностика колонок) —
-  архитектура и большая часть механики те же самые. Отличия от исходного
-  скрипта:
+  → Архив, ручной перенос решённых, диагностика колонок) — архитектура и
+  большая часть механики те же самые. Отличия от исходного скрипта:
 
    - Обрабатываются только 2 типа тикетов — API и PSP (не 4).
    - Нет специального листа "for TA" и связанной с ним маршрутизации —
@@ -39,11 +38,6 @@
      отслеживаемого статуса, а также тикеты, вручную помеченные командой
      как решённые (см. ниже). Создаются автоматически при первом
      переносе.
-   - Лог переноса — накопительный журнал тикетов, перенесённых в архив
-     вручную (по кнопке "Перенести решённые в архив" или автоматически
-     в конце синхронизации). Колонки: Ticket ID, ГЕО, Субагент, Дата
-     переноса — департамент в лог намеренно не пишется. Рядом со сводкой
-     — живая формула-счётчик общего числа перенесённых тикетов.
 
   Исключённые статусы (CONFIG.excludedStatuses)
    Тот же список и та же логика, что и в исходном скрипте: строки
@@ -86,16 +80,13 @@
   Ручной перенос тикетов в архив
    Тикет из любого Tracking-листа переносится в свой Архив, если совпали
    ВСЕ условия хотя бы одного правила из CONFIG.manualArchive.rules
-   (правила проверяются по порядку, применяется первое совпавшее) — то
-   же самое, что и в исходном скрипте:
-    1) Актуальный статус = "В работе" И Результат = "Решено" — решили мы
-       сами, тикет уходит в Архив И записывается в Лог переноса
-       (учитывается счётчиком).
-    2) Результат = "Решено" при любом другом статусе — решено, но не
-       нами, в Архив БЕЗ записи в лог и без учёта в счётчике.
-    3) Результат = "Закрыт пользователем" — в Архив БЕЗ подсчёта.
+   (правила проверяются по порядку, применяется первое совпавшее):
+    1) Актуальный статус = "В работе" И Результат = "Решено".
+    2) Результат = "Решено" при любом другом статусе.
+    3) Результат = "Закрыт пользователем".
    "В работе у профильной команды" или пустой Результат — не финал,
-   тикет остаётся в Tracking.
+   тикет остаётся в Tracking. Отдельного журнала перенесённых тикетов
+   в этой таблице нет — перенос сразу в Архив, без записи куда-либо ещё.
    Проверка выполняется отдельной функцией
    archiveManuallyResolvedTickets() — её можно запустить кнопкой в меню,
    и она же автоматически прогоняется в конце syncTickets() для каждого
@@ -107,10 +98,9 @@
      сбрасывает условия базового фильтра и раскрывает скрытые строки и
      столбцы.
    - Проверка структуры ДО любых изменений (assertStagingHeaders,
-     assertTrackingHeaders, assertArchiveHeaders,
-     assertManualArchiveLogHeaders) — если не хватает колонки,
-     синхронизация падает с понятной ошибкой вместо того, чтобы молча
-     оставить поле пустым или дописать архив со сдвигом.
+     assertTrackingHeaders, assertArchiveHeaders) — если не хватает
+     колонки, синхронизация падает с понятной ошибкой вместо того, чтобы
+     молча оставить поле пустым или дописать архив со сдвигом.
    - Страховочный backfill пустой Даты фиксации у строки, остающейся в
      Tracking, — заполняется текущей датой, уже заполненные даты не
      трогаются.
@@ -261,8 +251,7 @@ const CONFIG = {
   // Правила ручного переноса тикетов в архив (см. шапку файла и
   // archiveManuallyResolvedTickets()). Тикет переносится, если совпали
   // ВСЕ условия хотя бы одного правила. Правила проверяются ПО ПОРЯДКУ,
-  // применяется первое совпавшее. Флаг log определяет, попадает ли тикет
-  // в Лог переноса (счётчик сделанного нами).
+  // применяется первое совпавшее.
   manualArchive: {
     rules: [
       {
@@ -270,28 +259,17 @@ const CONFIG = {
           { header: 'Актуальный статус', value: 'В работе' },
           { header: 'Результат', value: 'Решено' },
         ],
-        log: true,
       },
       {
         conditions: [
           { header: 'Результат', value: 'Решено' },
         ],
-        log: false,
       },
       {
         conditions: [
           { header: 'Результат', value: 'Закрыт пользователем' },
         ],
-        log: false,
       },
-    ],
-    logSheetName: 'Лог переноса',
-    // Поля, которые попадают в Лог переноса (в этом порядке).
-    // К ним всегда добавляется колонка "Дата переноса" последней.
-    logFields: [
-      { logHeader: 'Ticket ID', trackingHeader: 'Ticket ID' },
-      { logHeader: 'ГЕО', trackingHeader: 'ГЕО' },
-      { logHeader: 'Субагент', trackingHeader: 'Субагент' },
     ],
   },
 
@@ -337,7 +315,6 @@ function syncTickets() {
       try {
         const manualSummary = archiveManuallyResolvedForType(ss, typeConfig);
         summary.archivedManually = manualSummary.archived;
-        summary.archivedLogged = manualSummary.archivedLogged;
       } catch (e2) {
         summary.archivedManually = 0;
         summary.manualArchiveError = e2.message;
@@ -361,9 +338,7 @@ function syncTickets() {
     let line = s.typeValue + ': добавлено ' + s.added + ', обновлено ' + s.updated +
       ', в архив ' + s.removedGoneFromStatus +
       ', не тронуто ' + s.untouched + ', итого ' + s.total +
-      ', решено→архив ' + (s.archivedManually || 0) +
-      ' (в лог ' + (s.archivedLogged || 0) + ', без подсчёта ' +
-      ((s.archivedManually || 0) - (s.archivedLogged || 0)) + ')';
+      ', решено→архив ' + (s.archivedManually || 0);
     if (s.excludedByStatus) {
       line += ', исключено по статусу: ' + s.excludedByStatus;
     }
@@ -411,7 +386,6 @@ function syncOneType(ss, typeConfig, sHeaders, stagingRowsRaw, sIdCol) {
   // месте в самом Tracking-листе, и заголовки архива совпадают с ними.
   assertTrackingHeaders(typeConfig.trackingSheet, tHeaders);
   assertArchiveHeaders(ss, typeConfig.archiveSheet, tHeaders);
-  assertManualArchiveLogHeaders(ss);
 
   const tIdCol = tHeaders.indexOf(CONFIG.idHeaderTracking);
   const tFirstSeenCol = tHeaders.indexOf(CONFIG.firstSeenHeader);
@@ -659,11 +633,6 @@ function requiredStagingHeaders() {
   return headers;
 }
 
-// Заголовки листа "Лог переноса" в том виде, в каком их пишет скрипт.
-function manualArchiveLogHeaders() {
-  return CONFIG.manualArchive.logFields.map(f => f.logHeader).concat(['Дата переноса']);
-}
-
 /*
   Возвращает список отсутствующих заголовков (в порядке required).
 */
@@ -771,33 +740,6 @@ function assertArchiveHeaders(ss, archiveSheetName, headers) {
 }
 
 /*
-  Проверяет, что заголовки Лога переноса совпадают с тем, что пишет
-  скрипт (CONFIG.manualArchive.logFields + "Дата переноса"). Листа ещё
-  нет — не ошибка, он создастся сам с правильной шапкой.
-*/
-function assertManualArchiveLogHeaders(ss) {
-  const sheet = ss.getSheetByName(CONFIG.manualArchive.logSheetName);
-  if (!sheet || sheet.getLastRow() === 0) return;
-
-  const expected = manualArchiveLogHeaders();
-  if (sheet.getMaxColumns() < expected.length) {
-    throw new Error('В листе "' + CONFIG.manualArchive.logSheetName +
-      '" меньше колонок, чем нужно (' + sheet.getMaxColumns() + ' против ' +
-      expected.length + '). Ожидаемая шапка: ' + expected.join(' | ') + '.');
-  }
-
-  const actual = sheet.getRange(1, 1, 1, expected.length).getValues()[0];
-  if (actual.join('') === expected.join('')) return;
-
-  throw new Error('Заголовки листа "' + CONFIG.manualArchive.logSheetName +
-    '" не совпадают с ожидаемыми.\n  Сейчас:   ' + actual.join(' | ') +
-    '\n  Ожидаем:  ' + expected.join(' | ') +
-    '\nВставьте недостающую колонку через "Вставить столбец" в нужной ' +
-    'позиции (тогда старые записи сдвинутся вместе с данными). ' +
-    'Ничего не перенесено.');
-}
-
-/*
   Сбрасывает фильтрацию на листе: очищает условия базового фильтра
   (сам фильтр НЕ удаляется) и раскрывает скрытые строки и столбцы.
   Вызывается перед чтением каждого листа, чтобы синхронизация и ручные
@@ -843,9 +785,7 @@ function archiveManuallyResolvedTickets() {
 
   const lines = summaries.map(s => {
     if (s.error) return s.typeValue + ': ОШИБКА: ' + s.error;
-    return s.typeValue + ': перенесено ' + s.archived +
-      ' (в лог ' + (s.archivedLogged || 0) + ', без подсчёта ' +
-      (s.archived - (s.archivedLogged || 0)) + ')';
+    return s.typeValue + ': перенесено ' + s.archived;
   });
 
   SpreadsheetApp.getUi().alert(
@@ -864,13 +804,11 @@ function archiveManuallyResolvedForType(ss, typeConfig) {
   return {
     typeValue: typeConfig.value,
     archived: main.archived,
-    archivedLogged: main.archivedLogged,
   };
 }
 
 /*
-  Переносит решённые вручную тикеты с ОДНОГО листа в указанный Архив, и
-  пишет запись о каждом (по правилам с log: true) в Лог переноса.
+  Переносит решённые вручную тикеты с ОДНОГО листа в указанный Архив.
   mustExist=true — понятная ошибка, если лист не найден (Tracking-лист
   обязан существовать).
 */
@@ -880,7 +818,7 @@ function archiveManuallyResolvedFromSheet(ss, sheetName, archiveSheetName, mustE
     if (mustExist) {
       throw new Error('Лист "' + sheetName + '" не найден.');
     }
-    return { archived: 0, archivedLogged: 0 };
+    return { archived: 0 };
   }
 
   // Сбрасываем фильтрацию до чтения и перезаписи листа.
@@ -888,39 +826,30 @@ function archiveManuallyResolvedFromSheet(ss, sheetName, archiveSheetName, mustE
 
   const data = sheet.getDataRange().getValues();
   if (data.length <= 1) {
-    return { archived: 0, archivedLogged: 0 };
+    return { archived: 0 };
   }
 
   const headers = data[0];
 
-  // Сверяем заголовки архива и лога ДО перезаписи листа: если структура
+  // Сверяем заголовки архива ДО перезаписи листа: если структура
   // разъехалась, лучше упасть здесь, пока строки ещё на месте.
   assertArchiveHeaders(ss, archiveSheetName, headers);
-  assertManualArchiveLogHeaders(ss);
 
   const rows = data.slice(1);
-  const now = new Date();
 
   const keep = [];
   const toArchive = [];
-  const logEntries = [];
 
   rows.forEach(row => {
-    const rule = findManualArchiveRule(headers, row);
-    if (rule) {
+    if (findManualArchiveRule(headers, row)) {
       toArchive.push(row);
-      // В Лог переноса (счётчик сделанного нами) попадают только
-      // тикеты, перенесённые по правилам с log: true.
-      if (rule.log) {
-        logEntries.push(buildManualArchiveLogEntry(headers, row, now));
-      }
     } else {
       keep.push(row);
     }
   });
 
   if (toArchive.length === 0) {
-    return { archived: 0, archivedLogged: 0 };
+    return { archived: 0 };
   }
 
   sheet.clearContents();
@@ -939,9 +868,7 @@ function archiveManuallyResolvedFromSheet(ss, sheetName, archiveSheetName, mustE
   const archiveStartRow = archiveSheet.getLastRow() + 1;
   archiveSheet.getRange(archiveStartRow, 1, toArchive.length, headers.length).setValues(toArchive);
 
-  appendToManualArchiveLog(ss, logEntries);
-
-  return { archived: toArchive.length, archivedLogged: logEntries.length };
+  return { archived: toArchive.length };
 }
 
 /*
@@ -962,48 +889,12 @@ function findManualArchiveRule(headers, row) {
 }
 
 /*
-  Собирает одну строку для Лог переноса из полей
-  CONFIG.manualArchive.logFields плюс дату переноса последней колонкой.
-*/
-function buildManualArchiveLogEntry(headers, row, now) {
-  const values = CONFIG.manualArchive.logFields.map(f => {
-    const col = headers.indexOf(f.trackingHeader);
-    return col !== -1 ? row[col] : '';
-  });
-  values.push(now);
-  return values;
-}
-
-/*
-  Дописывает записи в накопительный лист Лог переноса, создавая его
-  при первом обращении (с заголовками и живой формулой-счётчиком).
-*/
-function appendToManualArchiveLog(ss, entries) {
-  if (!entries || entries.length === 0) return;
-
-  const logHeaders = manualArchiveLogHeaders();
-  let logSheet = ss.getSheetByName(CONFIG.manualArchive.logSheetName);
-
-  if (!logSheet) {
-    logSheet = ss.insertSheet(CONFIG.manualArchive.logSheetName);
-    logSheet.getRange(1, 1, 1, logHeaders.length).setValues([logHeaders]);
-    const labelCol = logHeaders.length + 2;
-    logSheet.getRange(1, labelCol).setValue('Итого перенесено:');
-    logSheet.getRange(1, labelCol + 1).setFormula('=COUNTA(A2:A)');
-  }
-
-  const startRow = logSheet.getLastRow() + 1;
-  logSheet.getRange(startRow, 1, entries.length, logHeaders.length).setValues(entries);
-}
-
-/*
   Диагностика структуры листов (пункт меню "Диагностика колонок").
   Проверяет всё, на чём обычно ломается синхронизация:
    - Буфер: есть ли все колонки-источники из CONFIG.fieldMap и служебные;
    - Tracking-листы: есть ли все обязательные колонки, плюс ручные
      колонки команды, плюс сколько строк с пустой Датой фиксации;
-   - Архивы: совпадают ли заголовки с соответствующим Tracking-листом;
-   - Лог переноса: совпадает ли шапка с CONFIG.manualArchive.logFields.
+   - Архивы: совпадают ли заголовки с соответствующим Tracking-листом.
   При промахе по заголовку показывает похожий заголовок и посимвольные
   hex-коды обоих — так ловятся гомоглифы и невидимые пробелы.
   Результат пишется в Logger (виден при запуске из редактора) и, если
@@ -1086,15 +977,6 @@ function diagnoseColumns() {
       lines.push('"' + typeConfig.archiveSheet + '": ' + e.message);
     }
   });
-
-  // --- Лог переноса ---
-  try {
-    assertManualArchiveLogHeaders(ss);
-    lines.push('"' + CONFIG.manualArchive.logSheetName + '": шапка в порядке (' +
-      manualArchiveLogHeaders().join(' | ') + ')');
-  } catch (e) {
-    lines.push('"' + CONFIG.manualArchive.logSheetName + '": ' + e.message);
-  }
 
   const message = 'Диагностика колонок\n\n' + lines.join('\n');
   Logger.log(message);
