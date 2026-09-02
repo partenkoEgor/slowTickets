@@ -471,6 +471,8 @@ function syncTickets() {
         summary.archivedManually = manualSummary.archived;
         summary.archivedLogged = manualSummary.archivedLogged;
         summary.archivedFromLane = manualSummary.archivedFromLane;
+        summary.headerLikeRowsRemoved =
+          (summary.headerLikeRowsRemoved || 0) + (manualSummary.garbageRemoved || 0);
       } catch (e2) {
         summary.archivedManually = 0;
         summary.manualArchiveError = e2.message;
@@ -508,6 +510,9 @@ function syncTickets() {
     }
     if (s.firstSeenBackfilled) {
       line += ', дозаполнено дат фиксации: ' + s.firstSeenBackfilled;
+    }
+    if (s.headerLikeRowsRemoved) {
+      line += ', удалено строк-дублей заголовка: ' + s.headerLikeRowsRemoved;
     }
     if (s.laneTotal !== null && s.laneTotal !== undefined) {
       line += ', "' + s.laneSheetName + '": ' + s.laneTotal;
@@ -683,8 +688,19 @@ function syncOneType(ss, typeConfig, sHeaders, stagingRowsRaw, sIdCol) {
     });
   }
 
+  // Строки-мусор: кто-то случайно скопировал и вставил шапку таблицы как
+  // обычную строку данных (см. looksLikeHeaderRow ниже). У такой строки
+  // Ticket ID = буквально "Ticket ID", статус никогда не совпадёт ни с
+  // одним реальным статусом — без этой проверки она осталась бы в
+  // Tracking навсегда, каждый раз просто переписываясь как есть.
+  let headerLikeRowsRemoved = 0;
+
   const trackingRowsById = new Map();
   for (let i = 1; i < trackingData.length; i++) {
+    if (looksLikeHeaderRow(trackingData[i], tHeaders)) {
+      headerLikeRowsRemoved++;
+      continue;
+    }
     const id = String(trackingData[i][tIdCol]).trim();
     if (id) trackingRowsById.set(id, trackingData[i]);
   }
@@ -714,6 +730,10 @@ function syncOneType(ss, typeConfig, sHeaders, stagingRowsRaw, sIdCol) {
             laneConfig.sheetName + '" полностью — он заполнится сам).');
         }
         for (let i = 1; i < laneData.length; i++) {
+          if (looksLikeHeaderRow(laneData[i], tHeaders)) {
+            headerLikeRowsRemoved++;
+            continue;
+          }
           const id = String(laneData[i][tIdCol]).trim();
           // Если один и тот же ID вдруг оказался и в Tracking, и на спец-листе —
           // приоритет у строки из Tracking (не перетираем её).
@@ -916,6 +936,7 @@ function syncOneType(ss, typeConfig, sHeaders, stagingRowsRaw, sIdCol) {
     firstSeenBackfilled: firstSeenBackfilled,
     excludedByStatus: excludedByStatus,
     excludedByGeoStatus: excludedByGeoStatus,
+    headerLikeRowsRemoved: headerLikeRowsRemoved,
   };
 }
 
@@ -1168,10 +1189,14 @@ function archiveManuallyResolvedTickets() {
   const lines = summaries.map(s => {
     if (s.error) return s.typeValue + ': ОШИБКА: ' + s.error;
     const laneConfig = SPECIAL_ROUTING_BY_TYPE.get(s.typeValue);
-    return s.typeValue + ': перенесено ' + s.archived +
+    let line = s.typeValue + ': перенесено ' + s.archived +
       ' (в лог ' + (s.archivedLogged || 0) + ', без подсчёта ' +
       (s.archived - (s.archivedLogged || 0)) +
       (s.archivedFromLane && laneConfig ? ', из "' + laneConfig.sheetName + '" ' + s.archivedFromLane : '') + ')';
+    if (s.garbageRemoved) {
+      line += ', удалено строк-дублей заголовка: ' + s.garbageRemoved;
+    }
+    return line;
   });
 
   SpreadsheetApp.getUi().alert(
@@ -1195,13 +1220,14 @@ function archiveManuallyResolvedForType(ss, typeConfig) {
   // это не ошибка, просто нечего переносить.
   const lane = laneConfig
     ? archiveManuallyResolvedFromSheet(ss, laneConfig.sheetName, typeConfig.archiveSheet, false)
-    : { archived: 0, archivedLogged: 0 };
+    : { archived: 0, archivedLogged: 0, garbageRemoved: 0 };
 
   return {
     typeValue: typeConfig.value,
     archived: main.archived + lane.archived,
     archivedLogged: main.archivedLogged + lane.archivedLogged,
     archivedFromLane: lane.archived,
+    garbageRemoved: (main.garbageRemoved || 0) + (lane.garbageRemoved || 0),
   };
 }
 
@@ -1218,7 +1244,7 @@ function archiveManuallyResolvedFromSheet(ss, sheetName, archiveSheetName, mustE
     if (mustExist) {
       throw new Error('Лист "' + sheetName + '" не найден.');
     }
-    return { archived: 0, archivedLogged: 0 };
+    return { archived: 0, archivedLogged: 0, garbageRemoved: 0 };
   }
 
   // Сбрасываем фильтрацию до чтения и перезаписи листа.
@@ -1226,7 +1252,7 @@ function archiveManuallyResolvedFromSheet(ss, sheetName, archiveSheetName, mustE
 
   const data = sheet.getDataRange().getValues();
   if (data.length <= 1) {
-    return { archived: 0, archivedLogged: 0 };
+    return { archived: 0, archivedLogged: 0, garbageRemoved: 0 };
   }
 
   const headers = data[0];
@@ -1243,8 +1269,16 @@ function archiveManuallyResolvedFromSheet(ss, sheetName, archiveSheetName, mustE
   const keep = [];
   const toArchive = [];
   const logEntries = [];
+  // Строки-дубли заголовка (см. looksLikeHeaderRow) просто выбрасываются —
+  // это не решённый тикет, архивировать и логировать их не нужно, они
+  // молча пропадают при следующей перезаписи листа.
+  let garbageRemoved = 0;
 
   rows.forEach(row => {
+    if (looksLikeHeaderRow(row, headers)) {
+      garbageRemoved++;
+      return;
+    }
     const rule = findManualArchiveRule(headers, row);
     if (rule) {
       toArchive.push(row);
@@ -1258,8 +1292,8 @@ function archiveManuallyResolvedFromSheet(ss, sheetName, archiveSheetName, mustE
     }
   });
 
-  if (toArchive.length === 0) {
-    return { archived: 0, archivedLogged: 0 };
+  if (toArchive.length === 0 && garbageRemoved === 0) {
+    return { archived: 0, archivedLogged: 0, garbageRemoved: 0 };
   }
 
   sheet.clearContents();
@@ -1268,19 +1302,21 @@ function archiveManuallyResolvedFromSheet(ss, sheetName, archiveSheetName, mustE
     sheet.getRange(2, 1, keep.length, headers.length).setValues(keep);
   }
 
-  let archiveSheet = ss.getSheetByName(archiveSheetName);
-  if (!archiveSheet) {
-    archiveSheet = ss.insertSheet(archiveSheetName);
+  if (toArchive.length > 0) {
+    let archiveSheet = ss.getSheetByName(archiveSheetName);
+    if (!archiveSheet) {
+      archiveSheet = ss.insertSheet(archiveSheetName);
+    }
+    if (archiveSheet.getLastRow() === 0) {
+      archiveSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    }
+    const archiveStartRow = archiveSheet.getLastRow() + 1;
+    archiveSheet.getRange(archiveStartRow, 1, toArchive.length, headers.length).setValues(toArchive);
   }
-  if (archiveSheet.getLastRow() === 0) {
-    archiveSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
-  }
-  const archiveStartRow = archiveSheet.getLastRow() + 1;
-  archiveSheet.getRange(archiveStartRow, 1, toArchive.length, headers.length).setValues(toArchive);
 
   appendToManualArchiveLog(ss, logEntries);
 
-  return { archived: toArchive.length, archivedLogged: logEntries.length };
+  return { archived: toArchive.length, archivedLogged: logEntries.length, garbageRemoved: garbageRemoved };
 }
 
 /*
@@ -1415,6 +1451,20 @@ function diagnoseFirstSeen() {
     lines.push('  пустых "' + CONFIG.firstSeenHeader + '" — ' + emptyIds.length +
       (emptyIds.length ? ' (' + emptyIds.slice(0, 15).join(', ') +
         (emptyIds.length > 15 ? ', …' : '') + ')' : ''));
+
+    // Строки-дубли заголовка (см. looksLikeHeaderRow) — кто-то случайно
+    // вставил шапку таблицы как обычную строку данных. Сам следующий
+    // запуск синхронизации/переноса решённых их удалит, но полезно видеть
+    // это здесь тоже, если синхронизация давно не запускалась.
+    const headerLikeRows = [];
+    for (let i = 1; i < data.length; i++) {
+      if (looksLikeHeaderRow(data[i], headers)) headerLikeRows.push('строка ' + (i + 1));
+    }
+    if (headerLikeRows.length > 0) {
+      lines.push('  ⚠ строк-дублей заголовка — ' + headerLikeRows.length +
+        ' (' + headerLikeRows.slice(0, 15).join(', ') +
+        (headerLikeRows.length > 15 ? ', …' : '') + ') — удалятся сами при следующей синхронизации');
+    }
   });
 
   // --- Архивы: шапка должна совпадать со своим Tracking-листом ---
@@ -1455,6 +1505,27 @@ function diagnoseFirstSeen() {
 */
 function charCodes(s) {
   return String(s).split('').map(c => c.charCodeAt(0).toString(16)).join(' ');
+}
+
+/*
+  Определяет, является ли строка данных случайно задублированной строкой
+  заголовков — например, кто-то скопировал шапку таблицы вместе с данными
+  и вставил её повторно ниже, или продублировал строку 1 через протяжку.
+  Возвращает true, только если ВСЕ ячейки строки побайтово совпадают со
+  своими заголовками — у настоящего тикета такое совпадение сразу по всем
+  колонкам практически невозможно, так что ложных срабатываний не будет.
+  Без этой проверки такая строка осталась бы в Tracking/на спец-листе
+  навсегда: её "Ticket ID" (буквально "Ticket ID") не встретится ни в
+  одной выгрузке, а её "Статус зависания" (буквально "Статус зависания")
+  никогда не попадёт в статус-скоуп — то есть ни обновиться, ни
+  заархивироваться она не может, и просто переписывается как есть на
+  каждой синхронизации.
+*/
+function looksLikeHeaderRow(row, headers) {
+  for (let i = 0; i < headers.length; i++) {
+    if (String(row[i]).trim() !== String(headers[i]).trim()) return false;
+  }
+  return true;
 }
 
 /*
