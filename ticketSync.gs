@@ -13,11 +13,18 @@
      Тип платежа, Дата фиксации, Дата создания тикета, Дата входа в статус,
      Processing time, ГЕО, Субагент, Департамент, Ticket ID, User ID,
      Статус зависания, Причина зависания, Актуальный статус, Результат,
-     Комментарий.
+     Комментарий, VIP.
      Тип платежа — не копия колонки Topic, а её перевод в "Депозит" /
      "Вывод" по словарю CONFIG.paymentTypeMap. Департамент — прямая копия
      колонки Department из выгрузки (CONFIG.fieldMap), заполняется на всех
      листах, включая спец-листы и архивы. В Лог переноса не попадает.
+     VIP — тоже не прямая копия: если значение колонки Type в Буфере
+     содержит подстроку "vip" (без учёта регистра — ловит VIP, VIP1,
+     VIP Gold и любые другие разновидности), в ячейку пишется "VIP",
+     иначе ячейка остаётся пустой. Пересчитывается заново при каждой
+     синхронизации по текущему значению Type из выгрузки — если тикет
+     перестал быть VIP, отметка снимается. Заполняется на всех листах
+     (Tracking, спец-листы, архивы), в Лог переноса не попадает.
    - BT M for TA, API for GEO, PSP for GEO — спец-листы (см. раздел
      "Спец-маршрутизация" ниже). Тикет уезжает туда вместо обычного
      Tracking-листа, если для него выполняется условие соответствующего
@@ -305,6 +312,13 @@ const CONFIG = {
     'Error while depositing funds': 'Депозит',
     'Withdrawal not received': 'Вывод',
   },
+
+  // Колонка VIP в Tracking не копируется из выгрузки дословно: если
+  // значение колонки Type в Буфере содержит подстроку "vip" (без учёта
+  // регистра — ловит VIP, VIP1, VIP Gold и т.п.), в ячейку пишется "VIP",
+  // иначе ячейка остаётся пустой.
+  vipHeader: 'VIP',
+  vipSourceHeader: 'Type',
 
   firstSeenHeader: 'Дата фиксации',
   statusEntryDateHeader: 'Дата входа в статус',
@@ -751,6 +765,9 @@ function syncOneType(ss, typeConfig, sHeaders, stagingRowsRaw, sIdCol) {
   const tPaymentTypeCol = tHeaders.indexOf(CONFIG.paymentTypeHeader);
   const sTopicCol = sHeaders.indexOf(CONFIG.paymentTypeSourceHeader);
 
+  const tVipCol = tHeaders.indexOf(CONFIG.vipHeader);
+  const sVipCol = sHeaders.indexOf(CONFIG.vipSourceHeader);
+
   function applyFieldMap(row, stagingRow) {
     Object.keys(CONFIG.fieldMap).forEach(tHeader => {
       const sHeader = CONFIG.fieldMap[tHeader];
@@ -762,6 +779,11 @@ function syncOneType(ss, typeConfig, sHeaders, stagingRowsRaw, sIdCol) {
     if (tPaymentTypeCol !== -1 && sTopicCol !== -1) {
       const topicValue = String(stagingRow[sTopicCol]).trim();
       row[tPaymentTypeCol] = CONFIG.paymentTypeMap[topicValue] || topicValue;
+    }
+
+    if (tVipCol !== -1 && sVipCol !== -1) {
+      const vipSourceValue = String(stagingRow[sVipCol]);
+      row[tVipCol] = /vip/i.test(vipSourceValue) ? 'VIP' : '';
     }
   }
 
@@ -958,6 +980,7 @@ function requiredTrackingHeaders() {
     CONFIG.statusEntryDateHeader,
     CONFIG.processingTimeHeader,
     CONFIG.statusHeaderTracking,
+    CONFIG.vipHeader,
   ].forEach(h => {
     if (h && headers.indexOf(h) === -1) headers.push(h);
   });
@@ -976,6 +999,7 @@ function requiredStagingHeaders() {
     CONFIG.idHeaderStaging,
     CONFIG.ticketTypeHeaderStaging,
     CONFIG.paymentTypeSourceHeader,
+    CONFIG.vipSourceHeader,
   ];
   if (CONFIG.geoStatusFilter && (CONFIG.geoStatusFilter.rules || []).length > 0) {
     extra.push(CONFIG.geoStatusFilter.geoHeaderStaging);
