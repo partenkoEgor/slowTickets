@@ -124,6 +124,56 @@
     - правила ручного переноса решённых (CONFIG.manualArchive) к
       спец-листу тоже применяются, перенос — в тот же общий архив.
 
+  Смена типа тикета (API -> PSP, BT M -> API и т.п.)
+   Тип тикета может поменяться прямо в процессе разбора. Каждый тип
+   синхронизируется по своему подмножеству строк Буфера, поэтому для
+   "старого" листа такой тикет выглядит как пропавший из выгрузки, а для
+   "нового" — как новый. Чтобы он не уехал в чужой Архив как решённый и
+   не задвоился сразу на двух листах, перед циклом по типам собирается
+   общий индекс "Ticket ID -> типы, под которыми ID встречается в этой
+   выгрузке" (stagingTypesById). Если тикет есть в Буфере, но НИ ОДНА
+   его строка не относится к текущему типу — это смена типа:
+    - строка снимается со старого листа (обычного Tracking или спец-листа),
+      в Архив НЕ уходит и в Лог переноса не пишется;
+    - на листе своего нового типа тикет заводится с нуля: Дата фиксации
+      = сегодня, ручные колонки (Причина зависания, Актуальный статус,
+      Результат) пустые. Ручная работа по старому листу не переносится —
+      это осознанное решение;
+    - если в новом типе тикет не проходит фильтры (excludedStatuses,
+      гео-фильтр, базовый Received, Processing time < minProcessingHours)
+      или его новый тип вообще не описан в CONFIG.types — он исчезнет
+      из таблицы целиком.
+   Проверка идёт ДО архивации по статус-скоупу и раньше ветки спец-
+   маршрутизации. В алерте синхронизации появляется счётчик "сменили
+   тип: N (→ PSP 2, → BT M 1)" — показывается, когда N > 0.
+   Строка Буфера с пустым Ticket type в индекс не попадает: такой тикет
+   ведёт себя как раньше (пропал из выгрузки).
+
+  Режим "Синхронизация без базового ресивда" (CONFIG.skipBaseReceived)
+   Отдельный пункт меню, запускает ту же синхронизацию, но с одним
+   дополнительным фильтром. Обычная кнопка "Синхронизировать" этот блок
+   не использует вообще и тянет Received целиком, как раньше.
+   В режиме строки Буфера типа BT M со статусом "Received" отбрасываются,
+   кроме тех, у которых сработало хотя бы одно правило keepIf: сейчас
+   это Department, содержащий "Mena Leads" (в выгрузке он приходит с
+   суффиксом бренда, например "Mena Leads 1X"), ИЛИ Type, равный "VIP",
+   "VIP-Casino" или "VIP-Hybrid". Остальные статусы BT M и все прочие
+   типы обрабатываются как обычно.
+   Отличие от CONFIG.excludedStatuses: тикет, который уже лежит в
+   Tracking и в этом прогоне попал под фильтр, НЕ архивируется и НЕ
+   остаётся на листе — он просто снимается с листа. Записи в Лог
+   переноса тоже нет. Вернётся он в таблицу только тогда, когда снова
+   придёт в выгрузке с подходящим статусом или признаком.
+   Отфильтрованные строки не участвуют в расчёте статус-скоупа выгрузки.
+   Буфер после прогона очищается по обычному правилу (если все 4 типа
+   прошли без ошибок).
+   В алерте появляется строка "базовый Received: пропущено N, снято с
+   листа M" (когда есть что показать).
+   ВАЖНО: колонки правил keepIf (Department, Type) обязаны быть в
+   Буфере — иначе режим падает с понятной ошибкой и ничего не трогает.
+   Без этой проверки правило после переименования колонки в выгрузке
+   молча перестало бы работать, и нужные тикеты вылетели бы с листа.
+
   Ручной перенос тикетов в архив
    Тикет из любого Tracking-листа (и любого спец-листа) переносится в
    свой Архив, если совпали ВСЕ условия хотя бы одного правила из
@@ -396,6 +446,52 @@ const CONFIG = {
     ],
   },
 
+  // Режим "Синхронизация без базового ресивда" — отдельный пункт меню
+  // (syncTicketsWithoutBaseReceived). Обычная синхронизация этот блок
+  // НЕ применяет.
+  //
+  // Строка Буфера отбрасывается, если её Ticket type входит в types И
+  // её статус входит в statusAnyOf (без учёта регистра) И НЕ сработало
+  // ни одно правило keepIf. Правила keepIf соединяются через ИЛИ:
+  // достаточно совпадения по одному, чтобы строка осталась. Сейчас их
+  // два: департамент Mena Leads и VIP-пользователи (колонка Type,
+  // три её значения). Добавить условие можно строкой в keepIf, логику
+  // трогать не нужно.
+  //
+  // Отличие от excludedStatuses: тикет, уже лежащий в Tracking и
+  // попавший под этот фильтр, снимается с листа БЕЗ архивации и без
+  // записи в Лог переноса.
+  //
+  // Колонка любого правила обязана быть в Буфере: если её нет, режим
+  // падает с понятной ошибкой и ничего не трогает. Иначе правило молча
+  // перестало бы работать после переименования колонки в выгрузке, и
+  // нужные тикеты вылетели бы с листа без архива.
+  // Правило keepIf срабатывает, если значение ячейки совпало с одним из
+  // valueAnyOf (точное сравнение) ИЛИ содержит одну из подстрок
+  // containsAnyOf. Оба списка сравниваются без учёта регистра и пробелов
+  // по краям, у правила можно задать любой из них или оба.
+  // Department сравнивается по вхождению не просто так: в выгрузке
+  // департамент приходит с суффиксом бренда ("Mena Leads 1X"), и точное
+  // сравнение с "Mena Leads" не совпало бы ни с одной строкой. Type
+  // сравнивается точно: значения известны целиком.
+  skipBaseReceived: {
+    types: ['BT M'],
+    statusHeaderStaging: 'External Status',
+    // В BT M-выгрузке статусы приходят с суффиксом бренда: "Received (M)".
+    // Буква в скобках в разных выгрузках оказывалась то латинской, то
+    // кириллической (та же история, что и в specialRouting.statusAnyOf
+    // выше), поэтому в списке оба варианта плюс написание без скобок.
+    statusAnyOf: [
+      'Received (М)', // кириллическая М
+      'Received (M)', // латинская M
+      'Received',
+    ],
+    keepIf: [
+      { header: 'Department', containsAnyOf: ['Mena Leads'] },
+      { header: 'Type', valueAnyOf: ['VIP', 'VIP-Casino', 'VIP-Hybrid'] },
+    ],
+  },
+
   // Спец-маршрутизация: не более одного правила на тип. Решение
   // принимается ПРЯМО ПО СТРОКЕ БУФЕРА, до записи в Tracking. См.
   // раздел "Спец-маршрутизация" в шапке файла за подробным описанием
@@ -448,12 +544,28 @@ const CONFIG = {
 // спец-листа — сейчас так у SMP M). Строится один раз из CONFIG.specialRouting.
 const SPECIAL_ROUTING_BY_TYPE = new Map(CONFIG.specialRouting.map(l => [l.typeValue, l]));
 
-function syncTickets() {
+/*
+  Пункт меню "Синхронизация без базового ресивда": та же синхронизация,
+  но с включённым фильтром CONFIG.skipBaseReceived (см. CONFIG выше).
+*/
+function syncTicketsWithoutBaseReceived() {
+  syncTickets({ skipBaseReceived: true });
+}
+
+function syncTickets(options) {
+  // Кнопка меню "Синхронизировать" вызывает функцию без аргументов — по
+  // умолчанию режим выключен и поведение ровно такое, как было раньше.
+  const skipBaseReceived = !!(options && options.skipBaseReceived);
+
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const stagingSheet = ss.getSheetByName(CONFIG.stagingSheetName);
   if (!stagingSheet) {
     throw new Error('Лист "' + CONFIG.stagingSheetName + '" не найден.');
   }
+
+  // Настройки режима проверяем до чтения данных: если колонка признака
+  // не заполнена, лучше упасть здесь, чем выкинуть тикеты с листа.
+  if (skipBaseReceived) assertSkipBaseReceivedConfig();
 
   // Сбрасываем фильтрацию, чтобы читать полный набор строк выгрузки.
   resetSheetFilters(stagingSheet);
@@ -468,18 +580,34 @@ function syncTickets() {
   // Сверяем заголовки выгрузки ДО обработки: не хватает колонки-источника —
   // синхронизация вообще не начинается и Буфер не очищается. Раньше
   // отсутствие такой колонки просто оставляло поле пустым во всех строках.
-  assertStagingHeaders(sHeaders);
+  assertStagingHeaders(sHeaders, skipBaseReceived);
 
   const sIdCol = sHeaders.indexOf(CONFIG.idHeaderStaging);
   const sTypeCol = sHeaders.indexOf(CONFIG.ticketTypeHeaderStaging);
 
   const allStagingRows = stagingData.slice(1);
+
+  // Общий индекс "Ticket ID -> типы, под которыми ID встречается в этой
+  // выгрузке". Строится ДО цикла по типам и по ВСЕМ строкам Буфера, без
+  // фильтров: каждый тип синхронизируется по своему подмножеству строк и
+  // сам по себе не может отличить сменивший тип тикет от пропавшего из
+  // выгрузки. Строки с пустым Ticket type не учитываются — по ним сказать
+  // ничего нельзя, пусть работает обычное поведение "пропал из выгрузки".
+  const stagingTypesById = new Map();
+  allStagingRows.forEach(r => {
+    const id = String(r[sIdCol]).trim();
+    const type = String(r[sTypeCol]).trim();
+    if (!id || !type) return;
+    if (!stagingTypesById.has(id)) stagingTypesById.set(id, new Set());
+    stagingTypesById.get(id).add(type);
+  });
+
   const summaries = [];
 
   CONFIG.types.forEach(typeConfig => {
     const rowsOfType = allStagingRows.filter(r => String(r[sTypeCol]).trim() === typeConfig.value);
     try {
-      const summary = syncOneType(ss, typeConfig, sHeaders, rowsOfType, sIdCol);
+      const summary = syncOneType(ss, typeConfig, sHeaders, rowsOfType, sIdCol, stagingTypesById, skipBaseReceived);
       try {
         const manualSummary = archiveManuallyResolvedForType(ss, typeConfig);
         summary.archivedManually = manualSummary.archived;
@@ -522,6 +650,14 @@ function syncTickets() {
     if (s.excludedByGeoStatus) {
       line += ', исключено по гео-фильтру: ' + s.excludedByGeoStatus;
     }
+    if (s.movedToOtherType) {
+      line += ', сменили тип: ' + s.movedToOtherType +
+        (s.movedToTypes ? ' (' + s.movedToTypes + ')' : '');
+    }
+    if (s.baseReceivedSkipped || s.baseReceivedRemoved) {
+      line += ', базовый Received: пропущено ' + (s.baseReceivedSkipped || 0) +
+        ', снято с листа ' + (s.baseReceivedRemoved || 0);
+    }
     if (s.firstSeenBackfilled) {
       line += ', дозаполнено дат фиксации: ' + s.firstSeenBackfilled;
     }
@@ -542,7 +678,10 @@ function syncTickets() {
     lines.push('Буфер НЕ очищен из-за ошибок выше. Почините лист(ы) и запустите синхронизацию ещё раз.');
   }
 
-  SpreadsheetApp.getUi().alert('Синхронизация завершена.\n\n' + lines.join('\n'));
+  SpreadsheetApp.getUi().alert(
+    (skipBaseReceived
+      ? 'Синхронизация без базового ресивда завершена.'
+      : 'Синхронизация завершена.') + '\n\n' + lines.join('\n'));
 }
 
 /*
@@ -596,7 +735,7 @@ function buildLaneMatcher(laneConfig, sHeaders) {
   против своего листа Tracking, своего спец-листа (если есть в
   CONFIG.specialRouting) и своего листа Архива.
 */
-function syncOneType(ss, typeConfig, sHeaders, stagingRowsRaw, sIdCol) {
+function syncOneType(ss, typeConfig, sHeaders, stagingRowsRaw, sIdCol, stagingTypesById, skipBaseReceived) {
   const trackingSheet = ss.getSheetByName(typeConfig.trackingSheet);
   if (!trackingSheet) {
     throw new Error('Лист "' + typeConfig.trackingSheet + '" не найден. Создайте его с теми же заголовками, что и в остальных Tracking-листах.');
@@ -681,6 +820,59 @@ function syncOneType(ss, typeConfig, sHeaders, stagingRowsRaw, sIdCol) {
     });
   }
 
+  // --- Фильтр базового Received (CONFIG.skipBaseReceived) ---
+  // Работает только в режиме "Синхронизация без базового ресивда".
+  // Отбрасывает строки нужного типа со статусом из statusAnyOf, кроме
+  // тех, где сработало хотя бы одно правило keepIf (Mena Leads, VIP).
+  // Как и фильтры выше, применяется до дедупа и до расчёта статус-скоупа.
+  // ID отброшенных строк запоминаем: такие тикеты нужно СНЯТЬ с листа
+  // без архивации (см. ветку ниже), а не архивировать по статус-скоупу.
+  let baseReceivedSkipped = 0;
+  const baseReceivedDroppedIds = new Set();
+  const sbrConfig = CONFIG.skipBaseReceived;
+  const sbrApplies = skipBaseReceived && sbrConfig &&
+    (!sbrConfig.types || sbrConfig.types.length === 0 ||
+      sbrConfig.types.indexOf(typeConfig.value) !== -1);
+  if (sbrApplies) {
+    const sbrStatusCol = sHeaders.indexOf(sbrConfig.statusHeaderStaging);
+    if (sbrStatusCol === -1) {
+      throw new Error('Колонка "' + sbrConfig.statusHeaderStaging +
+        '" не найдена в Буфере — фильтр базового Received применить невозможно.');
+    }
+    const sbrStatusesLower = sbrConfig.statusAnyOf.map(s => String(s).trim().toLowerCase());
+    // Колонки правил keepIf разрешаем один раз, до прохода по строкам:
+    // отсутствие любой из них — ошибка, иначе правило молча перестанет
+    // работать и нужные тикеты (VIP, Mena Leads) вылетят с листа.
+    const keepRules = sbrConfig.keepIf.map(rule => {
+      const col = sHeaders.indexOf(rule.header);
+      if (col === -1) {
+        throw new Error('Колонка "' + rule.header +
+          '" не найдена в Буфере — правило-исключение фильтра базового ' +
+          'Received применить невозможно. Проверьте CONFIG.skipBaseReceived.keepIf.');
+      }
+      return {
+        col: col,
+        values: (rule.valueAnyOf || []).map(v => String(v).trim().toLowerCase()),
+        contains: (rule.containsAnyOf || []).map(v => String(v).trim().toLowerCase()),
+      };
+    });
+
+    stagingRowsAfterExclusion = stagingRowsAfterExclusion.filter(row => {
+      const status = String(row[sbrStatusCol]).trim().toLowerCase();
+      if (sbrStatusesLower.indexOf(status) === -1) return true;
+      const keep = keepRules.some(rule => {
+        const cell = String(row[rule.col]).trim().toLowerCase();
+        if (rule.values.indexOf(cell) !== -1) return true;
+        return rule.contains.some(sub => cell.indexOf(sub) !== -1);
+      });
+      if (keep) return true;
+      baseReceivedSkipped++;
+      const droppedId = String(row[sIdCol]).trim();
+      if (droppedId) baseReceivedDroppedIds.add(droppedId);
+      return false;
+    });
+  }
+
   // Дедуп строк этого типа по Ticket ID (оставляем первое вхождение)
   const stagingIds = new Set();
   const stagingRows = [];
@@ -760,6 +952,20 @@ function syncOneType(ss, typeConfig, sHeaders, stagingRowsRaw, sIdCol) {
     }
   }
 
+  // Смена типа тикета. В выгрузке ID есть, но ни одна его строка не
+  // относится к текущему типу — значит тикет уехал в другой тип, а не
+  // вышел из отслеживаемого статуса. Архивировать такую строку нельзя:
+  // она ляжет в Архив чужого типа как решённая и параллельно заведётся
+  // заново на новом листе (дубль). Возвращает целевой тип для счётчика
+  // или null, если смены типа нет.
+  function typeChangedTo(id) {
+    if (!stagingTypesById) return null;
+    const types = stagingTypesById.get(id);
+    if (!types || types.size === 0) return null;
+    if (types.has(typeConfig.value)) return null;
+    return Array.from(types).join('/');
+  }
+
   const now = new Date();
 
   const tPaymentTypeCol = tHeaders.indexOf(CONFIG.paymentTypeHeader);
@@ -820,6 +1026,9 @@ function syncOneType(ss, typeConfig, sHeaders, stagingRowsRaw, sIdCol) {
   const result = [];
   const laneResult = [];
   const toArchive = [];
+  let movedToOtherType = 0;
+  const movedToTypeCounts = new Map();
+  let baseReceivedRemoved = 0;
   let removedGoneFromStatus = 0;
   let removedFromLane = 0;
   let droppedTooFresh = 0;
@@ -850,6 +1059,28 @@ function syncOneType(ss, typeConfig, sHeaders, stagingRowsRaw, sIdCol) {
       }
       result.push(row);
       updated++;
+      return;
+    }
+
+    // Тикет отброшен фильтром базового Received в этом прогоне: снимаем
+    // строку с листа без архивации и без записи в Лог переноса. Проверка
+    // идёт раньше смены типа и раньше архивации по статус-скоупу. Вернётся
+    // тикет только тогда, когда снова придёт в выгрузке с подходящим
+    // статусом или признаком (Mena Leads, VIP).
+    if (baseReceivedDroppedIds.has(id)) {
+      baseReceivedRemoved++;
+      return;
+    }
+
+    // Тикета нет среди строк ЭТОГО типа. Прежде чем считать его пропавшим
+    // из выгрузки, проверяем общий индекс: может быть, он просто сменил
+    // тип. Проверка идёт раньше лейновой ветки и архивации по
+    // статус-скоупу: строка снимается с листа без архивации, а на листе
+    // нового типа тикет заводится с нуля (см. typeChangedTo выше).
+    const newType = typeChangedTo(id);
+    if (newType) {
+      movedToOtherType++;
+      movedToTypeCounts.set(newType, (movedToTypeCounts.get(newType) || 0) + 1);
       return;
     }
 
@@ -959,6 +1190,12 @@ function syncOneType(ss, typeConfig, sHeaders, stagingRowsRaw, sIdCol) {
     excludedByStatus: excludedByStatus,
     excludedByGeoStatus: excludedByGeoStatus,
     headerLikeRowsRemoved: headerLikeRowsRemoved,
+    movedToOtherType: movedToOtherType,
+    movedToTypes: Array.from(movedToTypeCounts)
+      .map(e => '→ ' + e[0] + ' ' + e[1])
+      .join(', '),
+    baseReceivedSkipped: baseReceivedSkipped,
+    baseReceivedRemoved: baseReceivedRemoved,
   };
 }
 
@@ -988,12 +1225,76 @@ function requiredTrackingHeaders() {
 }
 
 /*
+  Колонки Буфера, нужные режиму "без базового ресивда": колонка статуса
+  и колонки всех правил keepIf. Незаполненные (placeholder) правила
+  пропускаются — их ловит assertSkipBaseReceivedConfig().
+*/
+function skipBaseReceivedHeaders() {
+  const cfg = CONFIG.skipBaseReceived;
+  if (!cfg) return [];
+  const headers = [];
+  if (cfg.statusHeaderStaging) headers.push(cfg.statusHeaderStaging);
+  (cfg.keepIf || []).forEach(rule => {
+    if (rule.header && headers.indexOf(rule.header) === -1) headers.push(rule.header);
+  });
+  return headers;
+}
+
+/*
+  Проверяет, что режим "без базового ресивда" вообще настроен: заданы
+  тип, статусы и все правила-исключения с непустой колонкой и списком
+  значений. Вызывается в самом начале syncTickets() при запуске из
+  соответствующего пункта меню — до чтения и изменения любых листов.
+  Смысл проверки: незаполненное правило (например, колонка VIP) молча
+  превратилось бы в "никого не оставляем", и нужные тикеты вылетели бы
+  с листа без архива.
+*/
+function assertSkipBaseReceivedConfig() {
+  const cfg = CONFIG.skipBaseReceived;
+  const problems = [];
+
+  if (!cfg) {
+    throw new Error('Блок CONFIG.skipBaseReceived не заполнен — режим ' +
+      '"Синхронизация без базового ресивда" запускать нельзя.');
+  }
+  if (!cfg.types || cfg.types.length === 0) problems.push('не указан types (типы тикетов)');
+  if (!cfg.statusHeaderStaging) problems.push('не указана колонка статуса statusHeaderStaging');
+  if (!cfg.statusAnyOf || cfg.statusAnyOf.length === 0) problems.push('пустой список statusAnyOf');
+  if (!cfg.keepIf || cfg.keepIf.length === 0) {
+    problems.push('пустой список keepIf (некого оставлять — вылетит весь Received)');
+  } else {
+    cfg.keepIf.forEach((rule, i) => {
+      if (!rule.header) {
+        problems.push('правило keepIf №' + (i + 1) + ': не указана колонка выгрузки ' +
+          '(header). Впишите название колонки с нужным признаком, например ' +
+          'колонку VIP-пользователя');
+      }
+      const hasValues = rule.valueAnyOf && rule.valueAnyOf.length > 0;
+      const hasContains = rule.containsAnyOf && rule.containsAnyOf.length > 0;
+      if (!hasValues && !hasContains) {
+        problems.push('правило keepIf №' + (i + 1) + ': не заданы ни valueAnyOf ' +
+          '(точное совпадение), ни containsAnyOf (совпадение по вхождению)');
+      }
+    });
+  }
+
+  if (problems.length === 0) return;
+
+  throw new Error('Режим "Синхронизация без базового ресивда" не настроен:\n  ' +
+    problems.join('\n  ') +
+    '\nПоправьте блок CONFIG.skipBaseReceived. Синхронизация не запущена, ' +
+    'Буфер не очищен.');
+}
+
+/*
   Полный список колонок, которые ОБЯЗАНЫ быть в Буфере: все источники
   из CONFIG.fieldMap плюс служебные колонки (Ticket ID, Ticket type,
   Topic, колонка ГЕО для гео-фильтра, колонки, нужные каждому правилу
-  CONFIG.specialRouting).
+  CONFIG.specialRouting). forSkipBaseReceived добавляет колонки режима
+  "без базового ресивда": при обычном запуске их отсутствие синхронизации
+  не мешает.
 */
-function requiredStagingHeaders() {
+function requiredStagingHeaders(forSkipBaseReceived) {
   const headers = Object.keys(CONFIG.fieldMap).map(k => CONFIG.fieldMap[k]);
   const extra = [
     CONFIG.idHeaderStaging,
@@ -1012,6 +1313,9 @@ function requiredStagingHeaders() {
       extra.push(lane.geoHeaderStaging);
     }
   });
+  if (forSkipBaseReceived) {
+    skipBaseReceivedHeaders().forEach(h => extra.push(h));
+  }
   extra.forEach(h => {
     if (h && headers.indexOf(h) === -1) headers.push(h);
   });
@@ -1072,8 +1376,8 @@ function headerHint(actualHeaders, expected) {
   раз в начале syncTickets(): если чего-то нет, синхронизация не
   начинается вообще и Буфер остаётся нетронутым.
 */
-function assertStagingHeaders(sHeaders) {
-  const missing = missingHeaders(sHeaders, requiredStagingHeaders());
+function assertStagingHeaders(sHeaders, forSkipBaseReceived) {
+  const missing = missingHeaders(sHeaders, requiredStagingHeaders(forSkipBaseReceived));
   if (missing.length === 0) return;
   throw new Error('В листе "' + CONFIG.stagingSheetName +
     '" не найдены колонки выгрузки: ' + missing.join(', ') + '.' +
@@ -1435,7 +1739,15 @@ function diagnoseFirstSeen() {
     lines.push(CONFIG.stagingSheetName + ': лист пуст (выгрузка не вставлена)');
   } else {
     lines.push(CONFIG.stagingSheetName + ':');
-    lines.push(reportMissing(sHeaders, requiredStagingHeaders()));
+    lines.push(reportMissing(sHeaders, requiredStagingHeaders(true)));
+  }
+
+  // --- Режим "без базового ресивда": настроен ли блок CONFIG ---
+  try {
+    assertSkipBaseReceivedConfig();
+    lines.push('Режим "без базового ресивда": настроен');
+  } catch (e) {
+    lines.push('Режим "без базового ресивда": ' + e.message);
   }
 
   // --- Tracking-листы и все спец-листы ---
@@ -1559,6 +1871,7 @@ function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Тикеты')
     .addItem('Синхронизировать', 'syncTickets')
+    .addItem('Синхронизация без базового ресивда', 'syncTicketsWithoutBaseReceived')
     .addItem('Перенести решённые в архив', 'archiveManuallyResolvedTickets')
     .addItem('Диагностика колонок', 'diagnoseFirstSeen')
     .addToUi();
